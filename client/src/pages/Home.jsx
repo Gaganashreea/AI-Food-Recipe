@@ -5,7 +5,7 @@ import IngredientList from "../components/IngredientList";
 import DietaryFilter from "../components/DietaryFilter";
 import SuggestionsList from "../components/SuggestionsList";
 import Loader from "../components/Loader";
-
+import FreshnessReport from "../components/FreshnessReport";
 function Home() {
   const navigate = useNavigate();
   const {
@@ -52,6 +52,7 @@ function Home() {
       {ingredients.length > 0 && (
         <>
           <section className="ingredients-section"><IngredientList /></section>
+          <section className="freshness-section"><FreshnessReport /></section>
           <section className="filter-section"><DietaryFilter /></section>
           <section className="action-section">
             <button className="primary-btn" onClick={handleGenerateRecipe} disabled={loading}>

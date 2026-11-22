@@ -13,6 +13,8 @@ export const useRecipe = () => {
 
 export const RecipeProvider = ({ children }) => {
   const [ingredients,       setIngredients]       = useState([]);
+  const [freshness,         setFreshness]         = useState([]);   // per-item freshness report
+  const [prioritizeFresh,   setPrioritizeFresh]   = useState(true); // cook with "use first" items
   const [recipe,            setRecipe]            = useState(null);
   const [suggestions,       setSuggestions]       = useState([]);
   const [savedRecipes,      setSavedRecipes]      = useState([]);
@@ -25,6 +27,7 @@ export const RecipeProvider = ({ children }) => {
   const analyzeImage = useCallback(async (imageFile) => {
     setLoading(true);
     setError(null);
+    setFreshness([]); // don't show the previous photo's report
     try {
       const formData = new FormData();
       formData.append("image", imageFile);
@@ -34,6 +37,7 @@ export const RecipeProvider = ({ children }) => {
       });
 
       setIngredients(data.ingredients);
+      setFreshness(data.freshnessAnalysis || []);
       return data.ingredients;
     } catch (err) {
       const message = err.response?.data?.error || "Failed to analyze image";
@@ -44,6 +48,24 @@ export const RecipeProvider = ({ children }) => {
     }
   }, []);
 
+  // User corrected / cleared a printed expiry date -> server re-evaluates the item.
+  const updateExpiryDate = useCallback(
+    async (name, date) => {
+      try {
+        const payload = freshness.map((it) =>
+          it.name === name ? { ...it, manualExpiry: { date: date || null } } : it
+        );
+        const { data } = await axios.post(`${API_BASE}/freshness`, {
+          freshnessAnalysis: payload,
+        });
+        setFreshness(data.freshnessAnalysis);
+      } catch (err) {
+        setError(err.response?.data?.error || "Failed to update expiry date");
+      }
+    },
+    [freshness]
+  );
+
   const generateRecipe = useCallback(
     async (ingredientList, diet) => {
       setLoading(true);
@@ -52,6 +74,8 @@ export const RecipeProvider = ({ children }) => {
         const { data } = await axios.post(`${API_BASE}/generate`, {
           ingredients: ingredientList || ingredients,
           dietaryPreference: diet || dietaryPreference,
+          freshness,
+          prioritizeFresh, // spoiled items are always excluded; this only toggles prioritising
         });
 
         setRecipe(data.recipe);
@@ -64,7 +88,7 @@ export const RecipeProvider = ({ children }) => {
         setLoading(false);
       }
     },
-    [ingredients, dietaryPreference]
+    [ingredients, dietaryPreference, freshness, prioritizeFresh]
   );
 
   const getRecipeSuggestions = useCallback(
@@ -75,6 +99,8 @@ export const RecipeProvider = ({ children }) => {
         const { data } = await axios.post(`${API_BASE}/suggestions`, {
           ingredients: ingredientList || ingredients,
           dietaryPreference: diet || dietaryPreference,
+          freshness,
+          prioritizeFresh, // spoiled items are always excluded; this only toggles prioritising
         });
 
         setSuggestions(data.suggestions);
@@ -87,7 +113,7 @@ export const RecipeProvider = ({ children }) => {
         setLoading(false);
       }
     },
-    [ingredients, dietaryPreference]
+    [ingredients, dietaryPreference, freshness, prioritizeFresh]
   );
 
   const saveRecipe = useCallback(async (recipeData) => {
@@ -137,6 +163,9 @@ export const RecipeProvider = ({ children }) => {
 
   const value = {
     ingredients, setIngredients,
+    freshness,
+    updateExpiryDate,
+    prioritizeFresh, setPrioritizeFresh,
     recipe, setRecipe,
     suggestions,
     savedRecipes,

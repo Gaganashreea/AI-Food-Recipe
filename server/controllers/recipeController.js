@@ -1,5 +1,11 @@
 const { groq } = require("../config/gemini");
 const Recipe = require("../models/Recipe");
+const {
+  normalizeFreshness,
+  partitionIngredients,
+  buildFreshnessPromptSection,
+  todayISO,
+} = require("../utils/freshness");
 
 // ── POST /api/recipes/analyze ────────────────────────────────
 const analyzeImage = async (req, res) => {
@@ -8,13 +14,12 @@ const analyzeImage = async (req, res) => {
       return res.status(400).json({ error: "No image file uploaded" });
     }
 
-    // STEP A: Convert buffer to Base64 with MIME type
     const base64Image = req.file.buffer.toString("base64");
     const mimeType = req.file.mimetype;
 
-    // STEP B: Call Groq Vision
     const response = await groq.chat.completions.create({
       model: "qwen/qwen3.8-27b",
+      temperature: 0.2,
       messages: [
         {
           role: "user",
@@ -28,24 +33,44 @@ const analyzeImage = async (req, res) => {
             {
               type: "text",
               text: `
-Analyze this food image carefully.
+You are the food-freshness inspector of a smart refrigerator app.
 
+Analyze this food image carefully.
 Identify ALL visible ingredients, food items, or dishes.
 
-For every identifiable food item, also analyze:
-1. Its visible condition
-2. Its freshness
-3. Its estimated remaining shelf life
-4. Its food waste risk
-5. Whether it should be used first
+For every identifiable food item, judge freshness from visible cues only:
+- Produce: browning, dark/soft spots, wilting, wrinkling, bruising, sprouting, mold
+- Meat / fish: grey or green discoloration, slimy or sticky surface, dryness
+- Dairy / bread / prepared food: mold, discoloration, separation, pooled liquid
+- Packaged food: bulging or damaged packaging, only if clearly visible
+
+Today's date is ${todayISO()}.
+
+ALSO READ PRINTED DATES:
+If a package label clearly shows an expiry / use-by / best-before date for an item, read it.
+- Only read a date that is clearly printed and legible. NEVER guess or calculate one.
+- Ignore manufacturing / packaging / MFG / packed-on dates.
+- "expiryDateText": the text exactly as printed, e.g. "EXP 25 NOV 2026".
+- "expiryDate": that same date as YYYY-MM-DD. If the numeric format is ambiguous, assume DD/MM/YYYY.
+  If only a month and year are printed, use the last day of that month.
+- "dateType": "use-by", "best-before", "expiry" or "unknown".
+- If there is no legible date for an item, set all three to null.
+
+Freshness scale:
+- Fresh: looks like it was just bought, no defects
+- Good: minor, normal ageing, fine for several more days
+- Fair: visible ageing, should be used soon
+- Poor: visible spoilage (mold, slime, rot, strong discoloration) - should be discarded
+- Cannot determine visually: sealed/opaque packaging or too far/blurry to judge
 
 IMPORTANT:
 - Identify ingredients dynamically from the image.
 - Do NOT invent ingredients that are not visible.
-- Do NOT provide an exact expiry date.
-- Give a reasonable remaining shelf-life range.
-- If freshness cannot reasonably be determined visually, say "Cannot determine visually".
-- If this is a prepared dish, identify the dish and its visible or reasonably identifiable ingredients.
+- Do NOT provide an exact expiry date unless it is printed on the package.
+- Give a reasonable remaining shelf-life range assuming it is kept refrigerated.
+- Never mark an item "Fresh" or "Good" if you cannot actually see its condition.
+- If this is a prepared dish, identify the dish and its visible ingredients.
+- Keep "condition" under 15 words.
 
 Return ONLY valid JSON.
 Do not include markdown.
@@ -53,34 +78,41 @@ Do not include markdown.
 Use exactly this structure:
 
 {
-  "ingredients": [
-    "ingredient 1",
-    "ingredient 2"
-  ],
+  "ingredients": ["ingredient 1", "ingredient 2"],
   "freshnessAnalysis": [
     {
-      "name": "ingredient name",
-      "condition": "visible condition",
+      "name": "ingredient name (same text as in ingredients)",
+      "condition": "short description of what you see",
       "freshness": "Fresh/Good/Fair/Poor/Cannot determine visually",
-      "estimatedShelfLife": "estimated remaining time",
+      "estimatedShelfLife": "e.g. 2-3 days",
+      "estimatedDaysMin": 2,
+      "estimatedDaysMax": 3,
       "wasteRisk": "Low/Medium/High",
-      "useFirst": true
+      "useFirst": true,
+      "expiryDateText": "EXP 25 NOV 2026 or null",
+      "expiryDate": "2026-11-25 or null",
+      "dateType": "use-by/best-before/expiry/unknown or null"
     }
   ]
 }
+
+Use null for estimatedDaysMin / estimatedDaysMax when freshness is "Cannot determine visually".
+Use 0 for both when freshness is "Poor".
+Set useFirst to true for Fair items, Poor items, or anything with 2 days or less left.
 `,
             },
           ],
         },
       ],
-      max_tokens: 1000,
+      max_tokens: 3000,
     });
 
-    const text = response.choices[0].message.content;
+    const text = response.choices[0].message.content || "";
 
     console.log("Image analysis AI response:", text);
 
     const cleanedText = text
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/```json/gi, "")
       .replace(/```/g, "")
       .trim();
@@ -124,17 +156,15 @@ Use exactly this structure:
       });
     }
 
-    const ingredients = Array.isArray(analysis.ingredients)
-      ? analysis.ingredients
-      : [];
-
-    const freshnessAnalysis = Array.isArray(analysis.freshnessAnalysis)
-      ? analysis.freshnessAnalysis
-      : [];
+    const { ingredients, items, summary } = normalizeFreshness(
+      Array.isArray(analysis.ingredients) ? analysis.ingredients : [],
+      analysis.freshnessAnalysis
+    );
 
     res.json({
       ingredients,
-      freshnessAnalysis,
+      freshnessAnalysis: items,
+      freshnessSummary: summary,
       rawResponse: text,
     });
   } catch (error) {
@@ -145,17 +175,58 @@ Use exactly this structure:
     });
   }
 };
+// ── POST /api/recipes/freshness ──────────────────────────────
+// Re-evaluates freshness after the user edits/clears a printed date.
+const recomputeFreshness = async (req, res) => {
+  try {
+    const { freshnessAnalysis } = req.body;
 
+    if (!Array.isArray(freshnessAnalysis)) {
+      return res.status(400).json({ error: "freshnessAnalysis must be an array" });
+    }
+
+    const { items, summary } = normalizeFreshness(
+      freshnessAnalysis.map((i) => i && i.name).filter(Boolean),
+      freshnessAnalysis
+    );
+
+    res.json({ freshnessAnalysis: items, freshnessSummary: summary });
+  } catch (error) {
+    console.error("Recompute freshness error:", error);
+    res.status(500).json({ error: "Failed to update freshness" });
+  }
+};
 // ── POST /api/recipes/generate ───────────────────────────────
 const generateRecipe = async (req, res) => {
   try {
-    const { ingredients, dietaryPreference } = req.body;
+    const {
+      ingredients,
+      dietaryPreference,
+      freshness,
+      prioritizeFresh = true,
+    } = req.body;
 
     if (!ingredients || ingredients.length === 0) {
       return res.status(400).json({
         error: "Ingredients are required",
       });
     }
+
+    // Freshness-aware: cook with what is safe, prioritise what spoils soonest
+    const partition = partitionIngredients(ingredients, freshness);
+    const { usable, excluded } = partition;
+    // Spoiled items are ALWAYS excluded; prioritising is optional.
+    const prioritized = prioritizeFresh === false ? [] : partition.prioritized;
+
+    if (usable.length === 0) {
+      return res.status(400).json({
+        error:
+          "All detected items appear spoiled, so no recipe was generated. Please check them and discard anything unsafe.",
+      });
+    }
+
+    const usableNames = usable.map((i) => i.name);
+    const freshnessSection = buildFreshnessPromptSection(prioritized, excluded);
 
     // STEP A: Build dietary filter
     const dietFilter = dietaryPreference
@@ -167,9 +238,11 @@ const generateRecipe = async (req, res) => {
 You are a professional chef and nutritionist.
 
 Based on these ingredients:
-${ingredients.join(", ")}
+${usableNames.join(", ")}
 
 ${dietFilter}
+
+${freshnessSection}
 
 Generate one detailed recipe.
 
@@ -287,8 +360,10 @@ Use exactly this structure:
       }
     }
 
-    // STEP F: Attach original detected ingredients
+    // STEP F: Attach original detected ingredients + freshness decisions
     recipe.detectedIngredients = ingredients;
+    recipe.prioritizedIngredients = prioritized.map((i) => i.name);
+    recipe.excludedIngredients = excluded.map((i) => i.name);
 
     res.json({
       recipe,
@@ -305,13 +380,32 @@ Use exactly this structure:
 // ── POST /api/recipes/suggestions ───────────────────────────
 const generateMultipleRecipes = async (req, res) => {
   try {
-    const { ingredients, dietaryPreference } = req.body;
+    const {
+      ingredients,
+      dietaryPreference,
+      freshness,
+      prioritizeFresh = true,
+    } = req.body;
 
     if (!ingredients || ingredients.length === 0) {
       return res.status(400).json({
         error: "Ingredients are required",
       });
     }
+
+    const partition = partitionIngredients(ingredients, freshness);
+    const { usable, excluded } = partition;
+    const prioritized = prioritizeFresh === false ? [] : partition.prioritized;
+
+    if (usable.length === 0) {
+      return res.status(400).json({
+        error:
+          "All detected items appear spoiled, so no suggestions were generated. Please check them and discard anything unsafe.",
+      });
+    }
+
+    const usableNames = usable.map((i) => i.name);
+    const freshnessSection = buildFreshnessPromptSection(prioritized, excluded);
 
     const dietFilter = dietaryPreference
       ? `All recipes MUST be ${dietaryPreference}-friendly.`
@@ -321,9 +415,11 @@ const generateMultipleRecipes = async (req, res) => {
 You are a professional chef.
 
 Based on these ingredients:
-${ingredients.join(", ")}
+${usableNames.join(", ")}
 
 ${dietFilter}
+
+${freshnessSection}
 
 Suggest 3 different recipes that can be made.
 
@@ -495,6 +591,7 @@ const deleteRecipe = async (req, res) => {
 
 module.exports = {
   analyzeImage,
+  recomputeFreshness,
   generateRecipe,
   generateMultipleRecipes,
   saveRecipe,

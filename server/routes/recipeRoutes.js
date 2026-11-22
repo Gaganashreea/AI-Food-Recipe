@@ -3,6 +3,7 @@ const router = express.Router();
 const upload = require("../middleware/upload");
 const {
   analyzeImage,
+  recomputeFreshness,
   generateRecipe,
   generateMultipleRecipes,
   saveRecipe,
@@ -15,6 +16,7 @@ const {
 router.post("/analyze",     upload.single("image"), analyzeImage);
 router.post("/generate",    generateRecipe);
 router.post("/suggestions", generateMultipleRecipes);
+router.post("/freshness",   recomputeFreshness);
 
 // ── CRUD Routes ──────────────────────────────────────────────
 router.post("/save",        saveRecipe);
