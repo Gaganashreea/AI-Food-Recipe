@@ -45,6 +45,8 @@ const recipeSchema = new mongoose.Schema(
     },
     imageUrl:            { type: String },
     detectedIngredients: [String],
+    prioritizedIngredients: [String], // near-spoiling items the recipe was built around
+    excludedIngredients:   [String], // items left out because they looked spoiled
     servingSuggestions:  [String],
   },
   { timestamps: true }

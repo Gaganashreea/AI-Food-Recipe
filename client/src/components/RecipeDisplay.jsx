@@ -6,6 +6,20 @@ function RecipeDisplay({ recipe }) {
   return (
     <div className="recipe-display">
       <RecipeCard recipe={recipe} />
+            {recipe.prioritizedIngredients?.length > 0 && (
+        <div className="freshness-note use-soon">
+          ⏰ Built around ingredients that need using soon:{" "}
+          <strong>{recipe.prioritizedIngredients.join(", ")}</strong>
+        </div>
+      )}
+
+      {recipe.excludedIngredients?.length > 0 && (
+        <div className="freshness-note discard">
+          ⛔ Left out because they looked spoiled:{" "}
+          <strong>{recipe.excludedIngredients.join(", ")}</strong>. Please check them
+          and discard if unsafe.
+        </div>
+      )}
 
       <div className="recipe-section">
         <h3>Ingredients</h3>
